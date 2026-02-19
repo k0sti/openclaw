@@ -36,6 +36,7 @@ export interface Nip29BusOptions {
     text: string;
     kind: number;
     eventId: string;
+    tags: string[][];
   }) => Promise<void>;
   onError?: (error: Error, context: string) => void;
   onConnect?: (relay: string) => void;
@@ -141,15 +142,32 @@ export async function startNip29Bus(options: Nip29BusOptions): Promise<Nip29BusH
         return origAuth(async (evt: any) => finalizeEvent(evt, sk));
       };
 
-      // If challenge already arrived during connect, auth now
-      if ((relay as any).challenge) {
-        try { await relay.auth(); } catch { /* non-fatal */ }
-      }
-
       // Handle future auth challenges
       relay.onauth = async () => {
         try { await relay.auth(); } catch { /* non-fatal */ }
       };
+
+      // Wait for the AUTH challenge to arrive and complete before subscribing.
+      // Relays like zooid send AUTH immediately after connect; if we subscribe
+      // before the handshake finishes, the relay rejects with auth-required.
+      if ((relay as any).challenge) {
+        try { await relay.auth(); } catch { /* non-fatal */ }
+      } else {
+        // Give the relay a moment to send the AUTH challenge
+        await new Promise<void>((resolve) => {
+          const prevOnauth = relay.onauth;
+          const timeout = setTimeout(() => {
+            relay.onauth = prevOnauth;
+            resolve();
+          }, 2000);
+          relay.onauth = async () => {
+            clearTimeout(timeout);
+            try { await relay.auth(); } catch { /* non-fatal */ }
+            relay.onauth = prevOnauth;
+            resolve();
+          };
+        });
+      }
 
       // Sub to group messages
       const sub = relay.subscribe(
@@ -179,6 +197,7 @@ export async function startNip29Bus(options: Nip29BusOptions): Promise<Nip29BusH
                 text: event.content,
                 kind: event.kind,
                 eventId: event.id,
+                tags: event.tags,
               });
 
               scheduleStatePersist(event.created_at, event.id);

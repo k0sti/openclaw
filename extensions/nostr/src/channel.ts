@@ -306,7 +306,7 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = {
             privateKey: account.privateKey,
             groups: account.groups,
             accountId: account.accountId,
-            onMessage: async ({ groupId, senderPubkey, text, eventId }) => {
+            onMessage: async ({ groupId, senderPubkey, text, eventId, tags }) => {
               ctx.log?.debug?.(
                 `[${account.accountId}] Group ${groupId} msg from ${senderPubkey}: ${text.slice(0, 50)}...`,
               );
@@ -317,10 +317,17 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = {
                 groupCfg?.mentionOnly ?? account.groupRequireMention;
               if (requireMention) {
                 const botPubkey = account.publicKey;
-                const mentionsBot =
-                  text.includes(`nostr:${botPubkey}`) ||
-                  text.toLowerCase().includes(account.name?.toLowerCase() ?? "\x00");
-                if (!mentionsBot) return;
+                // Check p-tags for our pubkey (proper NIP-27 mention)
+                const pTagMention = tags?.some(
+                  (t: string[]) => t[0] === "p" && t[1] === botPubkey,
+                );
+                // Also check text for nostr: URI containing our pubkey
+                const textMention = text.includes(botPubkey);
+                // Fallback: check for bot name in text
+                const nameMention = account.name
+                  ? text.toLowerCase().includes(account.name.toLowerCase())
+                  : false;
+                if (!pTagMention && !textMention && !nameMention) return;
               }
 
               await (
@@ -372,19 +379,27 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = {
         }
       }
 
-      // Return cleanup function
-      return {
-        stop: () => {
-          bus.close();
-          activeBuses.delete(account.accountId);
-          metricsSnapshots.delete(account.accountId);
-          if (nip29Bus) {
-            nip29Bus.close();
-            activeNip29Buses.delete(account.accountId);
-          }
-          ctx.log?.info(`[${account.accountId}] Nostr provider stopped`);
-        },
-      };
+      // Keep the channel alive until the abort signal fires.
+      // Other channels (telegram, discord, etc.) return a long-lived promise;
+      // if we return immediately the channel manager thinks we exited and
+      // triggers auto-restart.
+      await new Promise<void>((resolve) => {
+        if (ctx.abortSignal.aborted) {
+          resolve();
+          return;
+        }
+        ctx.abortSignal.addEventListener("abort", () => resolve(), { once: true });
+      });
+
+      // Cleanup
+      bus.close();
+      activeBuses.delete(account.accountId);
+      metricsSnapshots.delete(account.accountId);
+      if (nip29Bus) {
+        nip29Bus.close();
+        activeNip29Buses.delete(account.accountId);
+      }
+      ctx.log?.info(`[${account.accountId}] Nostr provider stopped`);
     },
   },
 };
