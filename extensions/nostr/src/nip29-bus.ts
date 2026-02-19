@@ -132,21 +132,24 @@ export async function startNip29Bus(options: Nip29BusOptions): Promise<Nip29BusH
         onDisconnect?.(relayUrl);
       };
 
-      // NIP-42 AUTH: wait for challenge, sign, then subscribe
-      await new Promise<void>((resolve) => {
-        const timeout = setTimeout(() => resolve(), 3000);
-        relay.onauth = async () => {
-          try {
-            await relay.auth(async (evt: any) => finalizeEvent(evt, sk));
-            clearTimeout(timeout);
-            setTimeout(resolve, 500); // let relay process auth
-          } catch (err) {
-            onError?.(err as Error, `nip42 auth for ${relayUrl}`);
-            clearTimeout(timeout);
-            resolve();
-          }
-        };
-      });
+      // NIP-42 AUTH: patch relay.auth to always use our signer.
+      // nostr-tools has a bug where signAuthEvent=undefined causes an uncaught
+      // TypeError (evt.id on undefined) in a setTimeout. By always injecting
+      // our signer, both explicit and internal auth attempts succeed.
+      const origAuth = relay.auth.bind(relay);
+      relay.auth = async (_signAuthEvent?: any) => {
+        return origAuth(async (evt: any) => finalizeEvent(evt, sk));
+      };
+
+      // If challenge already arrived during connect, auth now
+      if ((relay as any).challenge) {
+        try { await relay.auth(); } catch { /* non-fatal */ }
+      }
+
+      // Handle future auth challenges
+      relay.onauth = async () => {
+        try { await relay.auth(); } catch { /* non-fatal */ }
+      };
 
       // Sub to group messages
       const sub = relay.subscribe(

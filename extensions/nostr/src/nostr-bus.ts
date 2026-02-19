@@ -333,7 +333,9 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
   const sk = validatePrivateKey(privateKey);
   const pk = getPublicKey(sk);
   const pool = new SimplePool({
-    // NIP-42 AUTH: auto-sign auth challenges for relays that require it
+    // NIP-42 AUTH: auto-sign auth challenges for relays that require it.
+    // We patch relay.auth to always use our signer, preventing a nostr-tools bug
+    // where signAuthEvent=undefined causes uncaught TypeError on evt.id in setTimeout.
     automaticallyAuth: (_relayUrl: string) => {
       return async () => {
         try {
@@ -341,7 +343,15 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
           const r = Array.from((pool as any).relays?.values?.() ?? []).find(
             (relay: any) => relay.url === normalizedUrl || relay.url === _relayUrl
           ) as any;
-          if (r) await r.auth(async (evt: any) => finalizeEvent(evt, sk));
+          if (r) {
+            // Patch relay.auth to always inject our signer
+            if (!(r as any).__authPatched) {
+              const origAuth = r.auth.bind(r);
+              r.auth = async (_signer?: any) => origAuth(async (evt: any) => finalizeEvent(evt, sk));
+              (r as any).__authPatched = true;
+            }
+            await r.auth();
+          }
         } catch { /* auth failed, non-fatal */ }
       };
     },
