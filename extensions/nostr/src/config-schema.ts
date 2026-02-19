@@ -83,6 +83,23 @@ export const NostrConfigSchema = z.object({
 
   /** Profile metadata (NIP-01 kind:0 content) */
   profile: NostrProfileSchema.optional(),
+
+  /** NIP-29 group chats */
+  groups: z
+    .array(
+      z.object({
+        id: z.string(),
+        relay: z.string(),
+        mentionOnly: z.boolean().optional(),
+      }),
+    )
+    .optional(),
+
+  /** Allowed sender pubkeys for group messages (npub or hex) */
+  groupAllowFrom: z.array(z.string()).optional(),
+
+  /** Require mention in group messages to trigger (default: true) */
+  groupRequireMention: z.boolean().optional().default(true),
 });
 
 export type NostrConfig = z.infer<typeof NostrConfigSchema>;

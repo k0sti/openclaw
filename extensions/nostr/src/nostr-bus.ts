@@ -332,7 +332,20 @@ export async function startNostrBus(options: NostrBusOptions): Promise<NostrBusH
 
   const sk = validatePrivateKey(privateKey);
   const pk = getPublicKey(sk);
-  const pool = new SimplePool();
+  const pool = new SimplePool({
+    // NIP-42 AUTH: auto-sign auth challenges for relays that require it
+    automaticallyAuth: (_relayUrl: string) => {
+      return async () => {
+        try {
+          const normalizedUrl = _relayUrl.replace(/\/$/, "");
+          const r = Array.from((pool as any).relays?.values?.() ?? []).find(
+            (relay: any) => relay.url === normalizedUrl || relay.url === _relayUrl
+          ) as any;
+          if (r) await r.auth(async (evt: any) => finalizeEvent(evt, sk));
+        } catch { /* auth failed, non-fatal */ }
+      };
+    },
+  });
   const accountId = options.accountId ?? pk.slice(0, 16);
   const gatewayStartedAt = Math.floor(Date.now() / 1000);
 

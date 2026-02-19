@@ -10,6 +10,7 @@ import type { NostrProfile } from "./config-schema.js";
 import { NostrConfigSchema } from "./config-schema.js";
 import type { MetricEvent, MetricsSnapshot } from "./metrics.js";
 import { normalizePubkey, startNostrBus, type NostrBusHandle } from "./nostr-bus.js";
+import { startNip29Bus, type Nip29BusHandle } from "./nip29-bus.js";
 import type { ProfilePublishResult } from "./nostr-profile.js";
 import { getNostrRuntime } from "./runtime.js";
 import {
@@ -21,6 +22,7 @@ import {
 
 // Store active bus handles per account
 const activeBuses = new Map<string, NostrBusHandle>();
+const activeNip29Buses = new Map<string, Nip29BusHandle>();
 
 // Store metrics snapshots per account (for status reporting)
 const metricsSnapshots = new Map<string, MetricsSnapshot>();
@@ -37,7 +39,7 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = {
     order: 100,
   },
   capabilities: {
-    chatTypes: ["direct"], // DMs only for MVP
+    chatTypes: ["direct", "group"],
     media: false, // No media for MVP
   },
   reload: { configPrefixes: ["channels.nostr"] },
@@ -115,6 +117,8 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = {
 
   messaging: {
     normalizeTarget: (target) => {
+      // Group targets: group:<groupId>
+      if (target.startsWith("group:")) return target;
       // Strip nostr: prefix if present
       const cleaned = target.replace(/^nostr:/i, "").trim();
       try {
@@ -126,9 +130,13 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = {
     targetResolver: {
       looksLikeId: (input) => {
         const trimmed = input.trim();
-        return trimmed.startsWith("npub1") || /^[0-9a-fA-F]{64}$/.test(trimmed);
+        return (
+          trimmed.startsWith("group:") ||
+          trimmed.startsWith("npub1") ||
+          /^[0-9a-fA-F]{64}$/.test(trimmed)
+        );
       },
-      hint: "<npub|hex pubkey|nostr:npub...>",
+      hint: "<npub|hex pubkey|nostr:npub...|group:groupId>",
     },
   },
 
@@ -138,16 +146,32 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = {
     sendText: async ({ to, text, accountId }) => {
       const core = getNostrRuntime();
       const aid = accountId ?? DEFAULT_ACCOUNT_ID;
-      const bus = activeBuses.get(aid);
-      if (!bus) {
-        throw new Error(`Nostr bus not running for account ${aid}`);
-      }
       const tableMode = core.channel.text.resolveMarkdownTableMode({
         cfg: core.config.loadConfig(),
         channel: "nostr",
         accountId: aid,
       });
       const message = core.channel.text.convertMarkdownTables(text ?? "", tableMode);
+
+      // Route group messages to NIP-29 bus
+      if (to.startsWith("group:")) {
+        const groupId = to.slice("group:".length);
+        const nip29Bus = activeNip29Buses.get(aid);
+        if (!nip29Bus) {
+          throw new Error(`NIP-29 bus not running for account ${aid}`);
+        }
+        await nip29Bus.sendGroupMessage(groupId, message);
+        return {
+          channel: "nostr" as const,
+          to,
+          messageId: `nostr-group-${Date.now()}`,
+        };
+      }
+
+      const bus = activeBuses.get(aid);
+      if (!bus) {
+        throw new Error(`Nostr bus not running for account ${aid}`);
+      }
       const normalizedTo = normalizePubkey(to);
       await bus.sendDm(normalizedTo, message);
       return {
@@ -274,12 +298,90 @@ export const nostrPlugin: ChannelPlugin<ResolvedNostrAccount> = {
         `[${account.accountId}] Nostr provider started, connected to ${account.relays.length} relay(s)`,
       );
 
+      // Start NIP-29 group bus if groups are configured
+      let nip29Bus: Nip29BusHandle | null = null;
+      if (account.groups.length > 0) {
+        try {
+          nip29Bus = await startNip29Bus({
+            privateKey: account.privateKey,
+            groups: account.groups,
+            accountId: account.accountId,
+            onMessage: async ({ groupId, senderPubkey, text, eventId }) => {
+              ctx.log?.debug?.(
+                `[${account.accountId}] Group ${groupId} msg from ${senderPubkey}: ${text.slice(0, 50)}...`,
+              );
+
+              // Mention gating
+              const groupCfg = account.groups.find((g) => g.id === groupId);
+              const requireMention =
+                groupCfg?.mentionOnly ?? account.groupRequireMention;
+              if (requireMention) {
+                const botPubkey = account.publicKey;
+                const mentionsBot =
+                  text.includes(`nostr:${botPubkey}`) ||
+                  text.toLowerCase().includes(account.name?.toLowerCase() ?? "\x00");
+                if (!mentionsBot) return;
+              }
+
+              await (
+                runtime.channel.reply as {
+                  handleInboundMessage?: (params: unknown) => Promise<void>;
+                }
+              ).handleInboundMessage?.({
+                channel: "nostr",
+                accountId: account.accountId,
+                senderId: senderPubkey,
+                chatType: "group",
+                chatId: `group:${groupId}`,
+                text,
+                reply: async (responseText: string) => {
+                  await nip29Bus!.sendGroupMessage(groupId, responseText);
+                },
+              });
+            },
+            onError: (error, context) => {
+              ctx.log?.error?.(
+                `[${account.accountId}] NIP-29 error (${context}): ${error.message}`,
+              );
+            },
+            onConnect: (relay) => {
+              ctx.log?.info?.(
+                `[${account.accountId}] NIP-29 connected to relay: ${relay}`,
+              );
+            },
+            onDisconnect: (relay) => {
+              ctx.log?.debug?.(
+                `[${account.accountId}] NIP-29 disconnected from relay: ${relay}`,
+              );
+            },
+            onEose: (relay) => {
+              ctx.log?.debug?.(
+                `[${account.accountId}] NIP-29 EOSE from relay: ${relay}`,
+              );
+            },
+          });
+
+          activeNip29Buses.set(account.accountId, nip29Bus);
+          ctx.log?.info(
+            `[${account.accountId}] NIP-29 group bus started for ${account.groups.length} group(s)`,
+          );
+        } catch (err) {
+          ctx.log?.error?.(
+            `[${account.accountId}] Failed to start NIP-29 bus: ${(err as Error).message}`,
+          );
+        }
+      }
+
       // Return cleanup function
       return {
         stop: () => {
           bus.close();
           activeBuses.delete(account.accountId);
           metricsSnapshots.delete(account.accountId);
+          if (nip29Bus) {
+            nip29Bus.close();
+            activeNip29Buses.delete(account.accountId);
+          }
           ctx.log?.info(`[${account.accountId}] Nostr provider stopped`);
         },
       };

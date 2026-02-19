@@ -8,6 +8,12 @@ import type { NostrProfile } from "./config-schema.js";
 import { getPublicKeyFromPrivate } from "./nostr-bus.js";
 import { DEFAULT_RELAYS } from "./nostr-bus.js";
 
+export interface NostrGroupConfig {
+  id: string;
+  relay: string;
+  mentionOnly?: boolean;
+}
+
 export interface NostrAccountConfig {
   enabled?: boolean;
   name?: string;
@@ -17,6 +23,9 @@ export interface NostrAccountConfig {
   dmPolicy?: "pairing" | "allowlist" | "open" | "disabled";
   allowFrom?: Array<string | number>;
   profile?: NostrProfile;
+  groups?: NostrGroupConfig[];
+  groupAllowFrom?: string[];
+  groupRequireMention?: boolean;
 }
 
 export interface ResolvedNostrAccount {
@@ -28,6 +37,9 @@ export interface ResolvedNostrAccount {
   publicKey: string;
   relays: string[];
   profile?: NostrProfile;
+  groups: NostrGroupConfig[];
+  groupAllowFrom: string[];
+  groupRequireMention: boolean;
   config: NostrAccountConfig;
 }
 
@@ -103,6 +115,9 @@ export function resolveNostrAccount(opts: {
     publicKey,
     relays: nostrCfg?.relays ?? DEFAULT_RELAYS,
     profile: nostrCfg?.profile,
+    groups: nostrCfg?.groups ?? [],
+    groupAllowFrom: nostrCfg?.groupAllowFrom ?? [],
+    groupRequireMention: nostrCfg?.groupRequireMention ?? true,
     config: {
       enabled: nostrCfg?.enabled,
       name: nostrCfg?.name,
@@ -111,6 +126,9 @@ export function resolveNostrAccount(opts: {
       dmPolicy: nostrCfg?.dmPolicy,
       allowFrom: nostrCfg?.allowFrom,
       profile: nostrCfg?.profile,
+      groups: nostrCfg?.groups,
+      groupAllowFrom: nostrCfg?.groupAllowFrom,
+      groupRequireMention: nostrCfg?.groupRequireMention,
     },
   };
 }
