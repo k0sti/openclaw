@@ -1114,15 +1114,18 @@ function emitJobFinished(
 
 export function wake(
   state: CronServiceState,
-  opts: { mode: "now" | "next-heartbeat"; text: string },
+  opts: { mode: "now" | "next-heartbeat"; text: string; sessionKey?: string },
 ) {
   const text = opts.text.trim();
   if (!text) {
     return { ok: false } as const;
   }
-  state.deps.enqueueSystemEvent(text);
+  state.deps.enqueueSystemEvent(
+    text,
+    opts.sessionKey ? { sessionKey: opts.sessionKey } : undefined,
+  );
   if (opts.mode === "now") {
-    state.deps.requestHeartbeatNow({ reason: "wake" });
+    state.deps.requestHeartbeatNow({ reason: "wake", sessionKey: opts.sessionKey });
   }
   return { ok: true } as const;
 }
